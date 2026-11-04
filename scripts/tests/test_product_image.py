@@ -183,6 +183,53 @@ class BuildTests(unittest.TestCase):
         )
 
 
+class PublicationTests(unittest.TestCase):
+    def test_publish_reads_machine_json_with_old_buildx(self):
+        docker = r"""
+        docker() {
+          if [[ "$*" == "buildx imagetools inspect "* ]]; then
+            if [[ " $* " == *" --raw "* ]]; then
+              printf '{"manifests":[{"digest":"%s","platform":{"os":"linux","architecture":"arm64"}}]}\n' "$ARM_DIGEST"
+            elif [[ " $* " == *" --format "* ]]; then
+              format="${!#}"
+              value="$DIGEST"
+              if [[ "$4" == *-arm64 ]]; then value="$ARM_DIGEST"; fi
+              # Buildx 0.23 treats this prefix as a human-readable summary.
+              if [[ "$format" == '{{.Manifest'* ]]; then
+                printf 'Name: image\nMediaType: index\nDigest: %s\n' "$value"
+              else
+                printf '{"digest":"%s"}\n' "$value"
+              fi
+            else
+              echo 'not found' >&2
+              return 1
+            fi
+          elif [[ "$*" == 'tag '* || "$*" == 'push '* || "$*" == 'buildx imagetools create '* ]]; then
+            return 0
+          else
+            echo "Unexpected Docker command: $*" >&2
+            return 1
+          fi
+        }
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            digest = "sha256:" + "b" * 64
+            run(
+                ["bash", "-euo", "pipefail", "-c", textwrap.dedent(docker) + program("Publish unused tags and verify the index")],
+                root,
+                IMAGE="fra.ocir.io/frsgxpf5mpny/explicavet-api",
+                SOURCE_SHA="a" * 40,
+                TAG="v1.2.3",
+                DIGEST=digest,
+                ARM_DIGEST="sha256:" + "a" * 64,
+                RUNNER_TEMP=str(root),
+                GITHUB_OUTPUT=str(root / "output"),
+                GITHUB_STEP_SUMMARY=str(root / "summary"),
+            )
+            self.assertEqual((root / "output").read_text(), "digest=" + digest + "\n")
+
+
 class PromotionTests(unittest.TestCase):
     def promote(self, missing_pin=False):
         calls = []

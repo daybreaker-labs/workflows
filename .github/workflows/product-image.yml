@@ -208,20 +208,20 @@ jobs:
           done
           docker tag product:qualification "$IMAGE:sha-$SOURCE_SHA-arm64"
           docker push "$IMAGE:sha-$SOURCE_SHA-arm64"
-          arm_digest=$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA-arm64" --format '{{.Manifest.Digest}}')
+          arm_digest=$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA-arm64" --format '{{json .Manifest}}' | jq -er '.digest')
           [[ "$arm_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker buildx imagetools create -t "$IMAGE:sha-$SOURCE_SHA" "$IMAGE@$arm_digest"
           if [ "$TAG" != "sha-$SOURCE_SHA" ]; then
             docker buildx imagetools create -t "$IMAGE:$TAG" "$IMAGE:sha-$SOURCE_SHA"
           fi
-          digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}')
+          digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | jq -er '.digest')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker buildx imagetools inspect "$IMAGE@$digest" --raw > "$RUNNER_TEMP/product-manifest.json"
           jq -e --arg digest "$arm_digest" \
             '(.manifests | length) == 1 and .manifests[0].digest == $digest
              and .manifests[0].platform.os == "linux" and .manifests[0].platform.architecture == "arm64"' \
             "$RUNNER_TEMP/product-manifest.json" > /dev/null
-          test "$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA" --format '{{.Manifest.Digest}}')" = "$digest"
+          test "$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA" --format '{{json .Manifest}}' | jq -er '.digest')" = "$digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           printf '%s\n' "Image: $IMAGE:$TAG" "Digest: $digest" "Source: $SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Remove OCIR credentials
