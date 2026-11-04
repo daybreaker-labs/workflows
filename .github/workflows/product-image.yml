@@ -1,0 +1,295 @@
+name: Product image
+
+# The build executes caller code without registry/App credentials. Publish
+# verifies its opaque archive before login; promotion only opens a draft PR.
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: OCIR repository name, matching the calling GitHub repository
+        required: true
+        type: string
+      publish:
+        description: Publish a stable vX.Y.Z tag or a develop/main qualification SHA
+        type: boolean
+        default: false
+      promote:
+        description: Open a draft GitOps digest PR for a stable release
+        type: boolean
+        default: false
+    secrets:
+      OCIR_AUTH_TOKEN:
+        required: false
+      DEPLOY_APP_ID:
+        required: false
+      DEPLOY_APP_PRIVATE_KEY:
+        required: false
+    outputs:
+      digest:
+        description: Published linux/arm64 index digest
+        value: ${{ jobs.publish.outputs.digest }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-image-${{ github.repository }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: fra.ocir.io/frsgxpf5mpny/${{ inputs.image-name }}
+  IMAGE_NAME: ${{ inputs.image-name }}
+
+jobs:
+  build:
+    runs-on: ${{ vars.CI_DOCKER_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
+      archive_sha256: ${{ steps.archive.outputs.sha256 }}
+      image_id: ${{ steps.archive.outputs.image_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate source and release ancestry
+        id: source
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          PROMOTE: ${{ inputs.promote }}
+        run: |
+          [[ "$IMAGE_NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+          test "$GITHUB_REPOSITORY" = "daybreaker-labs/$IMAGE_NAME"
+          test "$(uname -m)" = aarch64
+          sha=$(git rev-parse HEAD)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          tag="sha-$sha"
+          stable=false
+          if [[ "$GITHUB_REF" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            tag="${BASH_REMATCH[1]}"
+            git merge-base --is-ancestor "$sha" refs/remotes/origin/main
+            stable=true
+          elif [ "$PUBLISH" = true ]; then
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            case "$GITHUB_REF" in refs/heads/main|refs/heads/develop) ;; *) exit 1 ;; esac
+          fi
+          if [ "$PROMOTE" = true ]; then
+            test "$PUBLISH" = true
+            test "$stable" = true
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker builder
+        if: ${{ !startsWith(runner.name, 'blacksmith-') }}
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Set up Blacksmith builder
+        if: startsWith(runner.name, 'blacksmith-')
+        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
+        with:
+          cache-key: ${{ inputs.image-name }}-arm64
+          nofallback: 'true'
+      - name: Build without publication
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          TAG: ${{ steps.source.outputs.tag }}
+        run: |
+          # Reject moving external bases; named stages and scratch are allowed.
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          stages = set()
+          for line in Path('Dockerfile').read_text().splitlines():
+              if not line.upper().startswith('FROM '):
+                  continue
+              parts = line.split()
+              base = next(part for part in parts[1:] if not part.startswith('--'))
+              if base not in stages and base != 'scratch':
+                  assert re.fullmatch(r'.+@sha256:[0-9a-f]{64}', base), 'Pin each external base by digest'
+              if len(parts) >= 4 and parts[-2].upper() == 'AS':
+                  stages.add(parts[-1])
+          PY
+          build_args=(--build-arg "VCS_REF=$SOURCE_SHA")
+          if [ -f go.mod ]; then
+            go_version=$(awk '$1 == "go" {print $2; exit}' go.mod)
+            [[ "$go_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            build_args+=(--build-arg "GO_VERSION=$go_version")
+          fi
+          docker buildx build "${build_args[@]}" --platform linux/arm64 --load --provenance=false \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.version=$TAG" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t product:qualification .
+          test "$(docker image inspect product:qualification --format '{{.Architecture}}')" = arm64
+          user=$(docker image inspect product:qualification --format '{{.Config.User}}')
+          case "$user" in ''|root|0|root:*|0:*) echo 'Image must run as non-root' >&2; exit 1 ;; esac
+      - name: Archive the verified image
+        id: archive
+        if: inputs.publish
+        run: |
+          mkdir product-image
+          docker save product:qualification | gzip > product-image/image.tar.gz
+          echo "sha256=$(sha256sum product-image/image.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "image_id=$(docker image inspect product:qualification --format '{{.Id}}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: inputs.publish
+        with:
+          path: product-image/image.tar.gz
+          key: product-image-${{ github.run_id }}-${{ github.run_attempt }}
+
+  publish:
+    needs: build
+    if: >-
+      inputs.publish &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ${{ vars.CI_DOCKER_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 15
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    env:
+      SOURCE_SHA: ${{ needs.build.outputs.sha }}
+      TAG: ${{ needs.build.outputs.tag }}
+      ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
+      IMAGE_ID: ${{ needs.build.outputs.image_id }}
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: product-image/image.tar.gz
+          key: product-image-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Verify archive before credentials
+        run: |
+          [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          echo "$ARCHIVE_SHA256  product-image/image.tar.gz" | sha256sum -c -
+          gunzip -c product-image/image.tar.gz | docker load
+          rm -rf product-image
+          test "$(docker image inspect product:qualification --format '{{.Id}}')" = "$IMAGE_ID"
+          test "$(docker image inspect product:qualification --format '{{.Architecture}}')" = arm64
+          test "$(docker image inspect product:qualification --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_SHA"
+      - name: Prepare job-scoped Docker config
+        run: |
+          source_config="${DOCKER_CONFIG:-$HOME/.docker}"
+          DOCKER_CONFIG="$RUNNER_TEMP/product-docker-config"
+          install -d -m 700 "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          export DOCKER_CONFIG
+          if ! docker buildx version > /dev/null 2>&1 && [ -x "$source_config/cli-plugins/docker-buildx" ]; then
+            install -d -m 700 "$DOCKER_CONFIG/cli-plugins"
+            ln -s "$source_config/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          fi
+          docker buildx version
+      - name: Log in to OCIR
+        env:
+          OCIR_USERNAME: ${{ vars.OCIR_USERNAME }}
+          OCIR_AUTH_TOKEN: ${{ secrets.OCIR_AUTH_TOKEN }}
+        run: |
+          test -n "$OCIR_USERNAME"
+          test -n "$OCIR_AUTH_TOKEN"
+          printf '%s' "$OCIR_AUTH_TOKEN" | docker login fra.ocir.io --username "$OCIR_USERNAME" --password-stdin
+      - name: Publish unused tags and verify the index
+        id: publish
+        run: |
+          command -v jq > /dev/null
+          for tag in "$TAG" "sha-$SOURCE_SHA" "sha-$SOURCE_SHA-arm64"; do
+            if out=$(docker buildx imagetools inspect "$IMAGE:$tag" 2>&1); then
+              echo "$IMAGE:$tag exists; releases are never overwritten" >&2
+              exit 1
+            elif ! grep -Eqi 'not found|manifest unknown|name[ _]unknown' <<< "$out"; then
+              echo "$out" >&2
+              exit 1
+            fi
+          done
+          docker tag product:qualification "$IMAGE:sha-$SOURCE_SHA-arm64"
+          docker push "$IMAGE:sha-$SOURCE_SHA-arm64"
+          arm_digest=$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA-arm64" --format '{{.Manifest.Digest}}')
+          [[ "$arm_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools create -t "$IMAGE:sha-$SOURCE_SHA" "$IMAGE@$arm_digest"
+          if [ "$TAG" != "sha-$SOURCE_SHA" ]; then
+            docker buildx imagetools create -t "$IMAGE:$TAG" "$IMAGE:sha-$SOURCE_SHA"
+          fi
+          digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$digest" --raw > "$RUNNER_TEMP/product-manifest.json"
+          jq -e --arg digest "$arm_digest" \
+            '(.manifests | length) == 1 and .manifests[0].digest == $digest
+             and .manifests[0].platform.os == "linux" and .manifests[0].platform.architecture == "arm64"' \
+            "$RUNNER_TEMP/product-manifest.json" > /dev/null
+          test "$(docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_SHA" --format '{{.Manifest.Digest}}')" = "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "Image: $IMAGE:$TAG" "Digest: $digest" "Source: $SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove OCIR credentials
+        if: always()
+        run: |
+          docker logout fra.ocir.io || true
+          rm -f "$RUNNER_TEMP/product-docker-config/config.json"
+
+  promote:
+    needs: [build, publish]
+    if: inputs.promote
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: daybreaker-labs
+          repositories: daybreaker-gitops
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open a draft GitOps digest change
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          SOURCE_SHA: ${{ needs.build.outputs.sha }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          import urllib.request
+
+          image, digest, name = (os.environ[key] for key in ('IMAGE', 'DIGEST', 'IMAGE_NAME'))
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+          repo = 'repos/daybreaker-labs/daybreaker-gitops'
+          def api(path, body=None):
+              request = urllib.request.Request('https://api.github.com/' + repo + '/' + path,
+                  data=None if body is None else json.dumps(body).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          base = api('git/ref/heads/main')['object']['sha']
+          tree = []
+          for filename in ('deployment.yaml', 'migrate-job.yaml'):
+              path = f'components/{name}/base/{filename}'
+              original = api(f'contents/{path}?ref={base}')
+              content = base64.b64decode(original['content']).decode()
+              content, count = re.subn(r'(?m)^(\s*image: )' + re.escape(image) + r'@sha256:[0-9a-f]{64}$',
+                                      lambda match: match[1] + image + '@' + digest, content)
+              assert count == 1, f'Expected one digest pin in {path}'
+              tree.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': content})
+          base_tree = api('git/commits/' + base)['tree']['sha']
+          new_tree = api('git/trees', {'base_tree': base_tree, 'tree': tree})['sha']
+          assert new_tree != base_tree, 'Digest is already deployed'
+          commit = api('git/commits', {'message': f'chore({name}): promote {os.environ["TAG"]}',
+                                      'tree': new_tree, 'parents': [base]})['sha']
+          branch = f'promote/{name}-{os.environ["GITHUB_RUN_ID"]}-{os.environ["GITHUB_RUN_ATTEMPT"]}'
+          api('git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit})
+          pr = api('pulls', {'title': f'chore({name}): promote {os.environ["TAG"]}',
+              'head': branch, 'base': 'main', 'draft': True,
+              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.\n\nReview migrations and runtime readiness before merging. Roll back both image pins to their previous digest; schema rollback requires a separate review.'})
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(pr['html_url'] + '\n')
+          PY
