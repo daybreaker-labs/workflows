@@ -21,6 +21,10 @@ on:
         description: Also promote the migrate-job.yaml image pin
         type: boolean
         default: true
+      update-version-label:
+        description: Also set app.kubernetes.io/version in deployment.yaml to the release tag
+        type: boolean
+        default: false
     secrets:
       OCIR_AUTH_TOKEN:
         required: false
@@ -258,6 +262,7 @@ jobs:
       - name: Open a draft GitOps digest change
         env:
           MIGRATION_JOB: ${{ inputs.migration-job }}
+          UPDATE_VERSION_LABEL: ${{ inputs.update-version-label }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DIGEST: ${{ needs.publish.outputs.digest }}
           SOURCE_SHA: ${{ needs.build.outputs.sha }}
@@ -281,6 +286,43 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   return json.load(response)
 
+          tag = os.environ['TAG']
+          update_label = os.environ['UPDATE_VERSION_LABEL'] == 'true'
+          label = re.compile(r'^(\s*app\.kubernetes\.io/version:[ \t]+)(["\']?)[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\2((?:[ \t]+#.*)?[ \t]*)$')
+          pod_labels = ('labels', 'metadata', 'template', 'spec')
+          deployment_labels = ('labels', 'metadata')
+
+          def ancestors(lines, index):
+              # Keys enclosing a block-style line, nearest first.
+              indent = len(lines[index]) - len(lines[index].lstrip())
+              keys = []
+              for line in reversed(lines[:index]):
+                  text = line.lstrip()
+                  current = len(line) - len(text)
+                  if text and not text.startswith('#') and current < indent:
+                      keys.append(text.split(':', 1)[0])
+                      indent = current
+              return tuple(keys)
+
+          def set_version_label(content, path):
+              assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), 'The version label needs a stable vX.Y.Z tag'
+              lines = content.split('\n')
+              assert not any(line.startswith('---') for line in lines[1:]), f'{path} must hold a single YAML document'
+              found = {}
+              for index, line in enumerate(lines):
+                  if 'app.kubernetes.io/version:' in line and not line.lstrip().startswith('#'):
+                      assert label.match(line), f'Unsupported app.kubernetes.io/version label in {path}'
+                      where = ancestors(lines, index)
+                      assert where in (pod_labels, deployment_labels) and where not in found, \
+                          f'Unexpected app.kubernetes.io/version label location in {path}'
+                      found[where] = index
+              assert pod_labels in found, \
+                  f'Expected a block-style app.kubernetes.io/version label in spec.template.metadata.labels of {path}'
+              for index in found.values():
+                  match = label.match(lines[index])
+                  lines[index] = match[1] + match[2] + tag + match[2] + match[3]
+              return '\n'.join(lines)
+
           base = api('git/ref/heads/main')['object']['sha']
           tree = []
           filenames = ['deployment.yaml']
@@ -293,17 +335,19 @@ jobs:
               content, count = re.subn(r'(?m)^(\s*image: )' + re.escape(image) + r'@sha256:[0-9a-f]{64}$',
                                       lambda match: match[1] + image + '@' + digest, content)
               assert count == 1, f'Expected one digest pin in {path}'
+              if update_label and filename == 'deployment.yaml':
+                  content = set_version_label(content, path)
               tree.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': content})
           base_tree = api('git/commits/' + base)['tree']['sha']
           new_tree = api('git/trees', {'base_tree': base_tree, 'tree': tree})['sha']
           assert new_tree != base_tree, 'Digest is already deployed'
-          commit = api('git/commits', {'message': f'chore({name}): promote {os.environ["TAG"]}',
+          commit = api('git/commits', {'message': f'chore({name}): promote {tag}',
                                       'tree': new_tree, 'parents': [base]})['sha']
           branch = f'promote/{name}-{os.environ["GITHUB_RUN_ID"]}-{os.environ["GITHUB_RUN_ATTEMPT"]}'
           api('git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit})
-          pr = api('pulls', {'title': f'chore({name}): promote {os.environ["TAG"]}',
+          pr = api('pulls', {'title': f'chore({name}): promote {tag}',
               'head': branch, 'base': 'main', 'draft': True,
-              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.\n\nReview migrations and runtime readiness before merging. Roll back the promoted image pins to their previous digest; schema rollback requires a separate review.'})
+              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.' + (f' Set app.kubernetes.io/version to {tag}.' if update_label else '') + '\n\nReview migrations and runtime readiness before merging. Roll back the promoted image pins' + (' and version label' if update_label else '') + ' to their previous ' + ('values' if update_label else 'digest') + '; schema rollback requires a separate review.'})
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write(pr['html_url'] + '\n')
           PY

@@ -246,8 +246,39 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual((root / "output").read_text(), "digest=" + digest + "\n")
 
 
+PIN = "          image: fra.ocir.io/frsgxpf5mpny/explicavet-api@sha256:" + "a" * 64
+
+
+def deployment(pod_label="        app.kubernetes.io/version: v1.1.1", metadata_label=None):
+    lines = ["apiVersion: apps/v1", "kind: Deployment", "metadata:", "  name: explicavet-api"]
+    if metadata_label:
+        lines += ["  labels:", "    app.kubernetes.io/name: explicavet-api", metadata_label]
+    lines += [
+        "spec:",
+        "  selector:",
+        "    matchLabels: {app.kubernetes.io/name: explicavet-api}",
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        "        app.kubernetes.io/name: explicavet-api",
+    ]
+    if pod_label:
+        lines.append(pod_label)
+    lines += ["    spec:", "      containers:", "        - name: api", PIN, ""]
+    return "\n".join(lines)
+
+
 class PromotionTests(unittest.TestCase):
-    def promote(self, missing_pin=False, migration_job="true", invalid_file="migrate-job.yaml", duplicate_pin=False):
+    def promote(
+        self,
+        missing_pin=False,
+        migration_job="true",
+        invalid_file="migrate-job.yaml",
+        duplicate_pin=False,
+        update_version_label="false",
+        content=None,
+        invalid=False,
+    ):
         calls = []
 
         def request(request, timeout):
@@ -257,13 +288,13 @@ class PromotionTests(unittest.TestCase):
             if path == "git/ref/heads/main":
                 result = {"object": {"sha": "base"}}
             elif path.startswith("contents/"):
-                content = "          image: fra.ocir.io/frsgxpf5mpny/explicavet-api@sha256:" + "a" * 64
+                file_content = content if content is not None and "deployment.yaml" in path else PIN
                 if invalid_file in path:
                     if missing_pin:
-                        content = "unrelated: value"
+                        file_content = "unrelated: value"
                     elif duplicate_pin:
-                        content += "\n" + content
-                result = {"content": base64.b64encode(content.encode()).decode()}
+                        file_content += "\n" + file_content
+                result = {"content": base64.b64encode(file_content.encode()).decode()}
             elif path == "git/commits/base":
                 result = {"tree": {"sha": "old-tree"}}
             elif path == "pulls":
@@ -284,6 +315,7 @@ class PromotionTests(unittest.TestCase):
                     "TAG": "v1.2.3",
                     "SOURCE_SHA": "c" * 40,
                     "MIGRATION_JOB": migration_job,
+                    "UPDATE_VERSION_LABEL": update_version_label,
                     "GH_TOKEN": "fixture",
                     "GITHUB_RUN_ID": "123",
                     "GITHUB_RUN_ATTEMPT": "1",
@@ -292,7 +324,7 @@ class PromotionTests(unittest.TestCase):
             ),
             patch("urllib.request.urlopen", side_effect=request),
         ):
-            if missing_pin or duplicate_pin:
+            if missing_pin or duplicate_pin or invalid:
                 with self.assertRaises(AssertionError):
                     exec(compile(source, str(WORKFLOW), "exec"), {})  # noqa: S102 - execute the reviewed workflow program under a fake API
             else:
@@ -324,6 +356,74 @@ class PromotionTests(unittest.TestCase):
                 with self.subTest(migration_job=migration_job, filename=filename, invalid=invalid):
                     calls = self.promote(migration_job=migration_job, invalid_file=filename, **{invalid: True})
                     self.assertTrue(all(body is None for _, body in calls))
+
+    def test_version_label_changes_with_the_pin_when_enabled(self):
+        source = deployment(metadata_label="    app.kubernetes.io/version: \"v1.1.1\" # release")
+        calls = dict(self.promote(update_version_label="true", content=source, migration_job="false"))
+        blob = calls["git/trees"]["tree"][0]["content"]
+        expected = source.replace("v1.1.1", "v1.2.3").replace("a" * 64, "b" * 64)
+        self.assertEqual(blob, expected)
+        self.assertIn("Set app.kubernetes.io/version to v1.2.3.", calls["pulls"]["body"])
+        self.assertIn("Roll back the promoted image pins and version label to their previous values;", calls["pulls"]["body"])
+
+    def test_leading_document_marker_is_accepted(self):
+        source = "---\n" + deployment()
+        calls = dict(self.promote(update_version_label="true", content=source, migration_job="false"))
+        self.assertIn("version: v1.2.3", calls["git/trees"]["tree"][0]["content"])
+
+    def test_version_label_stays_untouched_when_disabled(self):
+        source = deployment(metadata_label="    app.kubernetes.io/version: v1.1.1")
+        calls = dict(self.promote(content=source, migration_job="false"))
+        blob = calls["git/trees"]["tree"][0]["content"]
+        self.assertEqual(blob, source.replace("a" * 64, "b" * 64))
+        self.assertNotIn("app.kubernetes.io/version to", calls["pulls"]["body"])
+        self.assertIn("Roll back the promoted image pins to their previous digest;", calls["pulls"]["body"])
+
+    def test_version_label_keeps_single_quotes_and_ignores_comments_and_field_refs(self):
+        source = deployment(pod_label="        app.kubernetes.io/version: 'v1.1.1'").replace(
+            "      containers:",
+            "      # app.kubernetes.io/version: set by promotion\n      containers:",
+        ).replace(
+            PIN,
+            PIN + "\n          env:\n            - name: OTEL_SERVICE_VERSION\n              valueFrom:\n"
+            "                fieldRef:\n                  fieldPath: metadata.labels['app.kubernetes.io/version']",
+        )
+        calls = dict(self.promote(update_version_label="true", content=source, migration_job="false"))
+        blob = calls["git/trees"]["tree"][0]["content"]
+        self.assertEqual(blob, source.replace("v1.1.1", "v1.2.3").replace("a" * 64, "b" * 64))
+
+    def test_version_label_never_touches_the_migration_job(self):
+        calls = dict(self.promote(update_version_label="true", content=deployment()))
+        blobs = {blob["path"]: blob["content"] for blob in calls["git/trees"]["tree"]}
+        self.assertEqual(blobs["components/explicavet-api/base/migrate-job.yaml"], PIN.replace("a" * 64, "b" * 64))
+        self.assertIn("version: v1.2.3", blobs["components/explicavet-api/base/deployment.yaml"])
+
+    def test_missing_or_misplaced_version_label_stops_before_any_write(self):
+        cases = {
+            "missing pod label": deployment(pod_label=None),
+            "metadata label only": deployment(pod_label=None, metadata_label="    app.kubernetes.io/version: v1.1.1"),
+            "flow style": deployment(pod_label="        {app.kubernetes.io/version: v1.1.1}"),
+            "empty value": deployment(pod_label="        app.kubernetes.io/version:"),
+            "value on the next line": deployment(pod_label="        app.kubernetes.io/version:\n          v1.1.1"),
+            "no space after colon": deployment(pod_label="        app.kubernetes.io/version:v1.1.1"),
+            "block scalar": deployment(pod_label="        app.kubernetes.io/version: >-\n          v1.1.1"),
+            "multi-line flow map": deployment(pod_label="        app.kubernetes.io/version: v1.1.1,"),
+            "second document": deployment() + "---\nkind: Service\nmetadata:\n  labels:\n    app.kubernetes.io/version: v1.1.1\n",
+            "duplicate": deployment(pod_label="        app.kubernetes.io/version: v1.1.1\n        app.kubernetes.io/version: v1.1.1"),
+            "selector label": deployment().replace(
+                "matchLabels: {app.kubernetes.io/name: explicavet-api}",
+                "matchLabels:\n      app.kubernetes.io/version: v1.1.1",
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name):
+                calls = self.promote(update_version_label="true", content=source, migration_job="false", invalid=True)
+                self.assertTrue(all(body is None for _, body in calls))
+
+    def test_update_version_label_input_defaults_to_false_and_reaches_promotion(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn("      update-version-label:\n        description: Also set app.kubernetes.io/version in deployment.yaml to the release tag\n        type: boolean\n        default: false", workflow)
+        self.assertIn("UPDATE_VERSION_LABEL: ${{ inputs.update-version-label }}", workflow)
 
     def test_migration_job_input_defaults_to_true_and_reaches_promotion(self):
         workflow = WORKFLOW.read_text()
