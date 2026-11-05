@@ -364,6 +364,12 @@ class PromotionTests(unittest.TestCase):
         expected = source.replace("v1.1.1", "v1.2.3").replace("a" * 64, "b" * 64)
         self.assertEqual(blob, expected)
         self.assertIn("Set app.kubernetes.io/version to v1.2.3.", calls["pulls"]["body"])
+        self.assertIn("Roll back the promoted image pins and version label to their previous values;", calls["pulls"]["body"])
+
+    def test_leading_document_marker_is_accepted(self):
+        source = "---\n" + deployment()
+        calls = dict(self.promote(update_version_label="true", content=source, migration_job="false"))
+        self.assertIn("version: v1.2.3", calls["git/trees"]["tree"][0]["content"])
 
     def test_version_label_stays_untouched_when_disabled(self):
         source = deployment(metadata_label="    app.kubernetes.io/version: v1.1.1")

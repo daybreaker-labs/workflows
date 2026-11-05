@@ -307,7 +307,7 @@ jobs:
           def set_version_label(content, path):
               assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), 'The version label needs a stable vX.Y.Z tag'
               lines = content.split('\n')
-              assert not any(line.startswith('---') for line in lines), f'{path} must hold a single YAML document'
+              assert not any(line.startswith('---') for line in lines[1:]), f'{path} must hold a single YAML document'
               found = {}
               for index, line in enumerate(lines):
                   if 'app.kubernetes.io/version:' in line and not line.lstrip().startswith('#'):
