@@ -37,6 +37,15 @@ introduces the first caller, `explicavet-api`.
   for products that migrate at startup; promotion then reads and changes only
   the deployment pin. All selected pins change in one Git commit and the PR
   stays in draft. Missing or duplicate selected pins stop promotion before writes.
+- The boolean input `update-version-label` defaults to `false`. When `true`,
+  promotion also sets `app.kubernetes.io/version` in `deployment.yaml` to the
+  stable release tag, keeping the leading `v` (for example `v1.1.3`), in the
+  same commit as the pin. The key must exist as a block-style label under
+  `spec.template.metadata.labels`; a `metadata.labels` entry on the Deployment
+  is updated when present. Only that key changes, `migrate-job.yaml` is never
+  edited, and a missing, flow-style, duplicate or misplaced label stops promotion
+  before writes instead of being created. Callers that derive `service.version`
+  from the pod label set it to keep that value in step with the promoted image.
 
 The build job runs caller code. The publication job never checks out or runs
 that code: it restores an archive under a run-attempt-specific cache key,
