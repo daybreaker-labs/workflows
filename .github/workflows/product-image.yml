@@ -45,7 +45,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: product-image-${{ github.repository }}${{ inputs.promotion-overlay != '' && format('-{0}', github.ref) || '' }}
+  group: product-image-${{ github.repository }}${{ inputs.promotion-overlay != '' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: false
 
 defaults:
@@ -177,6 +177,10 @@ jobs:
 
   publish:
     needs: build
+    # Release and staging builds of one source share immutable registry tags.
+    concurrency:
+      group: product-publication-${{ github.repository }}-${{ needs.build.outputs.sha }}
+      cancel-in-progress: false
     if: >-
       inputs.publish &&
       (github.event_name == 'workflow_dispatch' ||

@@ -68,8 +68,11 @@ new PR; it never closes a newer PR or a fork PR. The caller must also close olde
 pending staging PRs on every develop push before running qualification, including
 pushes that later fail their checks. The GitOps merger rechecks that the PR stays
 open immediately before merging. In-flight publication
-is never canceled because source image tags are immutable. Staging runs have a
-separate concurrency group by ref; the default consumer group is unchanged.
+is never canceled because source image tags are immutable. Staging runs have
+separate concurrency groups by source SHA so a delayed old run cannot replace
+the latest pending build. All publication jobs lock the repository and resolved
+source SHA so staging and releases cannot race to publish the same immutable
+source tags. The default consumer workflow group remains unchanged.
 
 The build job runs caller code. The publication job never checks out or runs
 that code: it restores an archive under a run-attempt-specific cache key,

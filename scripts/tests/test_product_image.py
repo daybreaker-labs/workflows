@@ -28,6 +28,10 @@ def run(command, cwd, **env):
 
 
 class SourceTests(unittest.TestCase):
+    def test_staging_and_releases_share_the_immutable_publication_lock(self):
+        self.assertIn("group: product-image-${{ github.repository }}${{ inputs.promotion-overlay != '' && format('-{0}', github.sha) || '' }}", WORKFLOW.read_text())
+        self.assertIn("    concurrency:\n      group: product-publication-${{ github.repository }}-${{ needs.build.outputs.sha }}\n      cancel-in-progress: false", WORKFLOW.read_text())
+
     def verify(self, ref="refs/heads/develop", event="workflow_dispatch", publish="true", promote="false", **env):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
