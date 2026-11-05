@@ -371,6 +371,20 @@ class PromotionTests(unittest.TestCase):
         blob = calls["git/trees"]["tree"][0]["content"]
         self.assertEqual(blob, source.replace("a" * 64, "b" * 64))
         self.assertNotIn("app.kubernetes.io/version to", calls["pulls"]["body"])
+        self.assertIn("Roll back the promoted image pins to their previous digest;", calls["pulls"]["body"])
+
+    def test_version_label_keeps_single_quotes_and_ignores_comments_and_field_refs(self):
+        source = deployment(pod_label="        app.kubernetes.io/version: 'v1.1.1'").replace(
+            "      containers:",
+            "      # app.kubernetes.io/version: set by promotion\n      containers:",
+        ).replace(
+            PIN,
+            PIN + "\n          env:\n            - name: OTEL_SERVICE_VERSION\n              valueFrom:\n"
+            "                fieldRef:\n                  fieldPath: metadata.labels['app.kubernetes.io/version']",
+        )
+        calls = dict(self.promote(update_version_label="true", content=source, migration_job="false"))
+        blob = calls["git/trees"]["tree"][0]["content"]
+        self.assertEqual(blob, source.replace("v1.1.1", "v1.2.3").replace("a" * 64, "b" * 64))
 
     def test_version_label_never_touches_the_migration_job(self):
         calls = dict(self.promote(update_version_label="true", content=deployment()))
@@ -383,6 +397,12 @@ class PromotionTests(unittest.TestCase):
             "missing pod label": deployment(pod_label=None),
             "metadata label only": deployment(pod_label=None, metadata_label="    app.kubernetes.io/version: v1.1.1"),
             "flow style": deployment(pod_label="        {app.kubernetes.io/version: v1.1.1}"),
+            "empty value": deployment(pod_label="        app.kubernetes.io/version:"),
+            "value on the next line": deployment(pod_label="        app.kubernetes.io/version:\n          v1.1.1"),
+            "no space after colon": deployment(pod_label="        app.kubernetes.io/version:v1.1.1"),
+            "block scalar": deployment(pod_label="        app.kubernetes.io/version: >-\n          v1.1.1"),
+            "multi-line flow map": deployment(pod_label="        app.kubernetes.io/version: v1.1.1,"),
+            "second document": deployment() + "---\nkind: Service\nmetadata:\n  labels:\n    app.kubernetes.io/version: v1.1.1\n",
             "duplicate": deployment(pod_label="        app.kubernetes.io/version: v1.1.1\n        app.kubernetes.io/version: v1.1.1"),
             "selector label": deployment().replace(
                 "matchLabels: {app.kubernetes.io/name: explicavet-api}",

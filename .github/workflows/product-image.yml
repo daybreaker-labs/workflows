@@ -288,7 +288,7 @@ jobs:
 
           tag = os.environ['TAG']
           update_label = os.environ['UPDATE_VERSION_LABEL'] == 'true'
-          label = re.compile(r'^(\s*app\.kubernetes\.io/version:[ \t]*)(["\']?)[^"\'#\s]*\2([ \t]*(?:#.*)?)$')
+          label = re.compile(r'^(\s*app\.kubernetes\.io/version:[ \t]+)(["\']?)[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\2((?:[ \t]+#.*)?[ \t]*)$')
           pod_labels = ('labels', 'metadata', 'template', 'spec')
           deployment_labels = ('labels', 'metadata')
 
@@ -307,9 +307,10 @@ jobs:
           def set_version_label(content, path):
               assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), 'The version label needs a stable vX.Y.Z tag'
               lines = content.split('\n')
+              assert not any(line.startswith('---') for line in lines), f'{path} must hold a single YAML document'
               found = {}
               for index, line in enumerate(lines):
-                  if 'app.kubernetes.io/version:' in line:
+                  if 'app.kubernetes.io/version:' in line and not line.lstrip().startswith('#'):
                       assert label.match(line), f'Unsupported app.kubernetes.io/version label in {path}'
                       where = ancestors(lines, index)
                       assert where in (pod_labels, deployment_labels) and where not in found, \
@@ -346,7 +347,7 @@ jobs:
           api('git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit})
           pr = api('pulls', {'title': f'chore({name}): promote {tag}',
               'head': branch, 'base': 'main', 'draft': True,
-              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.' + (f' Set app.kubernetes.io/version to {tag}.' if update_label else '') + '\n\nReview migrations and runtime readiness before merging. Roll back the promoted image pins to their previous digest; schema rollback requires a separate review.'})
+              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.' + (f' Set app.kubernetes.io/version to {tag}.' if update_label else '') + '\n\nReview migrations and runtime readiness before merging. Roll back the promoted image pins' + (' and version label' if update_label else '') + ' to their previous ' + ('values' if update_label else 'digest') + '; schema rollback requires a separate review.'})
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write(pr['html_url'] + '\n')
           PY
