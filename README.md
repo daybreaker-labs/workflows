@@ -20,11 +20,12 @@ introduces the first caller, `explicavet-api`.
   `VERSION` (`X.Y.Z` for stable `vX.Y.Z` tags, otherwise `dev`), and
   `BUILD_TIME` (UTC RFC 3339, shared with the creation label).
 - `publish: true` accepts a `vX.Y.Z` push, or a manual dispatch on `main` or
-  `develop`. Stable releases must already belong to fetched `origin/main`.
+  `develop` (and a `develop` push with the staging opt-in below). Stable releases
+  must already belong to fetched `origin/main`.
   Branch dispatches publish `sha-<full commit>` for qualification.
-- `promote: true` additionally requires a stable release. It opens a **draft**
-  GitOps PR; a maintainer reviews and merges it to deploy. Qualification images
-  cannot promote.
+- `promote: true` requires a stable release unless the staging opt-in below is
+  set. By default it opens a **draft** GitOps PR; a maintainer reviews and merges it to deploy. Qualification images
+  cannot promote without that opt-in.
 - Required caller configuration: `CI_DOCKER_RUNNER` for native ARM builds,
   `CI_RUNNER` for promotion, `OCIR_USERNAME` and secret `OCIR_AUTH_TOKEN`.
   Promotion also needs explicit `DEPLOY_APP_ID` and `DEPLOY_APP_PRIVATE_KEY`
@@ -47,6 +48,31 @@ introduces the first caller, `explicavet-api`.
   file with several YAML documents, stops promotion before writes instead of
   being created. Callers that derive `service.version` from the pod label set it
   to keep that value in step with the promoted image.
+
+The optional string input `promotion-overlay` defaults to an empty string, retaining
+that release contract. Set it to `daybreaker-02` only for `opensourceradar-api`
+on `develop`, with `migration-job: false` and `update-version-label: true`.
+This allows a push or manual qualification dispatch to publish and promote a
+`sha-<full commit>` image. Other overlays, products and refs fail before building.
+The caller must gate promotion on its source lint and test checks.
+
+Staging promotion changes only the digest in
+`components/opensourceradar-api/overlays/daybreaker-02/kustomization.yaml` and
+the pod `app.kubernetes.io/version` label in the overlay's `staging.yaml`.
+Both existing values must have the expected format and occur exactly once.
+The GitOps PR is ready for the separately guarded staging merger; release PRs
+remain drafts. Its branch begins `staging-promotion/opensourceradar-api/`.
+Promotion rechecks `develop` before and after PR creation and before closing
+each older App staging PR. If superseded, it skips promotion or closes its own
+new PR; it never closes a newer PR or a fork PR. The caller must also close older
+pending staging PRs on every develop push before running qualification, including
+pushes that later fail their checks. The GitOps merger rechecks that the PR stays
+open immediately before merging. In-flight publication
+is never canceled because source image tags are immutable. Staging runs have
+separate concurrency groups by source SHA so a delayed old run cannot replace
+the latest pending build. All publication jobs lock the repository and resolved
+source SHA so staging and releases cannot race to publish the same immutable
+source tags. The default consumer workflow group remains unchanged.
 
 The build job runs caller code. The publication job never checks out or runs
 that code: it restores an archive under a run-attempt-specific cache key,
