@@ -88,6 +88,9 @@ class SourceTests(unittest.TestCase):
                     "GITHUB_EVENT_NAME": event,
                     "PUBLISH": publish,
                     "PROMOTE": promote,
+                    "PROMOTION_OVERLAY": "",
+                    "MIGRATION_JOB": "true",
+                    "UPDATE_VERSION_LABEL": "false",
                     "GITHUB_OUTPUT": str(output),
                     **env,
                 },
@@ -113,6 +116,25 @@ class SourceTests(unittest.TestCase):
             self.verify(promote="true")
         with self.assertRaises(subprocess.CalledProcessError):
             self.verify(GITHUB_REPOSITORY="another-org/explicavet-api")
+
+    def test_staging_develop_push_can_publish_and_promote(self):
+        result = self.verify(event="push", promote="true", PROMOTION_OVERLAY="daybreaker-02",
+                             IMAGE_NAME="opensourceradar-api", GITHUB_REPOSITORY="daybreaker-labs/opensourceradar-api",
+                             MIGRATION_JOB="false", UPDATE_VERSION_LABEL="true")
+        self.assertEqual(result["tag"], "sha-" + result["sha"])
+
+    def test_staging_source_gate_rejects_wrong_target_ref_event_and_inputs(self):
+        env = dict(event="push", promote="true", PROMOTION_OVERLAY="daybreaker-02",
+                   IMAGE_NAME="opensourceradar-api", GITHUB_REPOSITORY="daybreaker-labs/opensourceradar-api",
+                   MIGRATION_JOB="false", UPDATE_VERSION_LABEL="true")
+        for change in ({"PROMOTION_OVERLAY": "daybreaker-01"}, {"ref": "refs/heads/main"},
+                       {"ref": "refs/tags/v1.2.3"}, {"event": "pull_request"},
+                       {"MIGRATION_JOB": "true"}, {"UPDATE_VERSION_LABEL": "false"},
+                       {"IMAGE_NAME": "explicavet-api", "GITHUB_REPOSITORY": "daybreaker-labs/explicavet-api"}):
+            with self.subTest(change=change), self.assertRaises(subprocess.CalledProcessError):
+                self.verify(**{**env, **change})
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.verify(event="push")
 
     def test_tampered_archive_fails_before_docker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -429,6 +451,120 @@ class PromotionTests(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         self.assertIn("      migration-job:\n        description: Also promote the migrate-job.yaml image pin\n        type: boolean\n        default: true", workflow)
         self.assertIn("MIGRATION_JOB: ${{ inputs.migration-job }}", workflow)
+
+
+class StagingPromotionTests(unittest.TestCase):
+    image = "fra.ocir.io/frsgxpf5mpny/opensourceradar-api"
+    source_sha = "c" * 40
+    kustomization = "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nimages:\n  - name: " + image + "\n    digest: sha256:" + "a" * 64 + "\n"
+    staging = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\ndata:\n  ENVIRONMENT: staging\n---\n" + deployment(pod_label="        app.kubernetes.io/version: sha-" + "a" * 40) + "---\nkind: Cluster\nmetadata:\n  name: database\n"
+
+    def promote(self, *, files=None, source_sha=None, source_sequence=None, previous=None, invalid=False, **env):
+        files = files or {"kustomization.yaml": self.kustomization, "staging.yaml": self.staging}
+        calls = []
+        sources = iter(source_sequence) if source_sequence else None
+
+        def request(request, timeout):
+            path = request.full_url.removeprefix("https://api.github.com/")
+            body = None if request.data is None else json.loads(request.data)
+            calls.append((path, body, request.get_method()))
+            path = path.split("/", 3)[-1]
+            if path == "git/ref/heads/develop":
+                self.assertEqual(request.headers["Authorization"], "Bearer source-fixture")
+                result = {"object": {"sha": next(sources) if sources else source_sha or self.source_sha}}
+            elif path == "git/ref/heads/main":
+                result = {"object": {"sha": "base"}}
+            elif path.startswith("contents/"):
+                filename = path.split("?")[0].rsplit("/", 1)[1]
+                result = {"content": base64.b64encode(files[filename].encode()).decode()}
+            elif path == "git/commits/base":
+                result = {"tree": {"sha": "old-tree"}}
+            elif path == "pulls":
+                result = {"html_url": "https://github.com/daybreaker-labs/daybreaker-gitops/pull/1000", "number": 1000}
+            elif path.startswith("pulls?"):
+                page = int(path.rsplit("=", 1)[1])
+                result = (previous or [])[100 * (page - 1):100 * page]
+            else:
+                result = {"sha": "new-object"}
+            return io.BytesIO(json.dumps(result).encode())
+
+        source = program("Open a draft GitOps digest change").split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "IMAGE": self.image, "IMAGE_NAME": "opensourceradar-api", "DIGEST": "sha256:" + "b" * 64,
+            "TAG": "sha-" + self.source_sha, "SOURCE_SHA": self.source_sha, "MIGRATION_JOB": "false",
+            "UPDATE_VERSION_LABEL": "true", "PROMOTION_OVERLAY": "daybreaker-02",
+            "GH_TOKEN": "deploy-fixture", "SOURCE_TOKEN": "source-fixture",
+            "GITHUB_REPOSITORY": "daybreaker-labs/opensourceradar-api", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary"), **env,
+        }), patch("urllib.request.urlopen", side_effect=request):
+            if invalid:
+                with self.assertRaises(AssertionError):
+                    exec(compile(source, str(WORKFLOW), "exec"), {})
+            else:
+                try:
+                    exec(compile(source, str(WORKFLOW), "exec"), {})
+                except SystemExit as error:
+                    self.assertEqual(error.code, 0)
+        return calls
+
+    def test_staging_changes_only_digest_and_label_in_ready_pr(self):
+        calls = {path.split("/", 3)[-1]: body for path, body, _ in self.promote()}
+        blobs = {blob["path"]: blob["content"] for blob in calls["git/trees"]["tree"]}
+        directory = "components/opensourceradar-api/overlays/daybreaker-02/"
+        self.assertEqual(blobs, {directory + "kustomization.yaml": self.kustomization.replace("a" * 64, "b" * 64),
+                                 directory + "staging.yaml": self.staging.replace("sha-" + "a" * 40, "sha-" + self.source_sha)})
+        self.assertFalse(calls["pulls"]["draft"])
+        self.assertTrue(calls["pulls"]["head"].startswith("staging-promotion/opensourceradar-api/"))
+
+    def test_stale_source_skips_before_writes(self):
+        calls = self.promote(source_sha="d" * 40)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(method == "GET" for _, _, method in calls))
+
+    def test_source_advance_before_pr_skips_creation(self):
+        calls = self.promote(source_sequence=[self.source_sha, "d" * 40])
+        self.assertFalse(any(path.endswith("/pulls") for path, _, _ in calls))
+        self.assertFalse(any(method == "PATCH" for _, _, method in calls))
+
+    def test_source_advance_after_pr_closes_own_pr_only(self):
+        calls = self.promote(source_sequence=[self.source_sha, self.source_sha, "d" * 40])
+        closes = [(path.rsplit("/", 1)[1], body) for path, body, method in calls if method == "PATCH"]
+        self.assertEqual(closes, [("1000", {"state": "closed"})])
+
+    def test_source_advance_during_supersession_cannot_close_another_pr(self):
+        previous = [{"number": 1, "head": {"ref": "staging-promotion/opensourceradar-api/old",
+                     "repo": {"full_name": "daybreaker-labs/daybreaker-gitops"}},
+                     "user": {"login": "daybreaker-gitops-deploy[bot]"}}]
+        previous.append({**previous[0], "number": 2})
+        for reads, expected in ((3, ["1000"]), (4, ["1", "1000"])):
+            with self.subTest(reads=reads):
+                calls = self.promote(source_sequence=[self.source_sha] * reads + ["d" * 40], previous=previous)
+                closes = [path.rsplit("/", 1)[1] for path, _, method in calls if method == "PATCH"]
+                self.assertEqual(closes, expected)
+
+    def test_staging_rejects_invalid_manifest_before_writes(self):
+        for files in (
+            {"kustomization.yaml": self.kustomization.replace("digest:", "tag:"), "staging.yaml": self.staging},
+            {"kustomization.yaml": self.kustomization + "    digest: sha256:" + "a" * 64, "staging.yaml": self.staging},
+            {"kustomization.yaml": self.kustomization, "staging.yaml": self.staging.replace("version: sha-", "version: v")},
+            {"kustomization.yaml": self.kustomization, "staging.yaml": self.staging + "app.kubernetes.io/version: sha-" + "a" * 40},
+            {"kustomization.yaml": self.kustomization, "staging.yaml": self.staging.replace("  template:", "  selector:")},
+        ):
+            with self.subTest(files=files):
+                self.assertTrue(all(method == "GET" for _, _, method in self.promote(files=files, invalid=True)))
+
+    def test_closes_only_prior_bot_staging_prs_and_paginates_before_mutation(self):
+        def pull(number, branch="staging-promotion/opensourceradar-api/old", author="daybreaker-gitops-deploy[bot]"):
+            return {"number": number, "head": {"ref": branch, "repo": {"full_name": "daybreaker-labs/daybreaker-gitops"}}, "user": {"login": author}}
+        fork = pull(103)
+        fork["head"]["repo"]["full_name"] = "fork/repository"
+        previous = [pull(i) for i in range(100)] + [pull(100), pull(1000), pull(1001), pull(101, branch="promote/release"), pull(102, author="person"), fork]
+        calls = self.promote(previous=previous)
+        closed = [path.rsplit("/", 1)[1] for path, body, method in calls if method == "PATCH"]
+        self.assertEqual(closed, [str(i) for i in range(101)])
+        page_two = next(i for i, (path, _, _) in enumerate(calls) if path.endswith("page=2"))
+        first_close = next(i for i, (_, _, method) in enumerate(calls) if method == "PATCH")
+        self.assertLess(page_two, first_close)
 
 
 if __name__ == "__main__":
