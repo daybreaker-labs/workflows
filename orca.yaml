@@ -1,0 +1,5 @@
+# Orca worktree hooks. Setup enables the pre-push local gate (scripts/check).
+scripts:
+  setup: |
+    git config core.hooksPath .githooks
+setupAgentStartupPolicy: start-immediately

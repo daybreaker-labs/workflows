@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Local gate: the `check` job of checks.yml, run before a push instead of in a
+# CI round. The job takes seconds, so every push runs all of it.
+#
+# .githooks/pre-push runs it once `git config core.hooksPath .githooks` is set.
+# The zizmor version is read from checks.yml; the local scan runs offline.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+failed=()
+step() {
+  local name=$1; shift
+  echo "== $name"
+  "$@" || failed+=("$name")
+}
+zizmor_version=$(sed -nE 's#.*zizmor/releases/download/v([0-9.]+)/.*#\1#p' .github/workflows/checks.yml | head -n 1)
+
+step "workflow program tests" python3 -m unittest discover -s scripts/tests
+step "actionlint" actionlint
+step "zizmor (offline)" uvx -q "zizmor@$zizmor_version" --offline --persona=regular .
+
+if [ ${#failed[@]} -gt 0 ]; then
+  printf 'local gate failed: %s\n' "${failed[*]}" >&2
+  exit 1
+fi
+echo "local gate passed"
