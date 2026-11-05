@@ -1,0 +1,11 @@
+# Orca worktree hooks. Setup enables the pre-push local gate (scripts/check).
+scripts:
+  setup: |
+    git config core.hooksPath .githooks
+    # Keep the read-only default-branch checkout current: fast-forward only, and
+    # only when it has no local changes.
+    git -C "$ORCA_ROOT_PATH" fetch -q --prune origin
+    if [ -z "$(git -C "$ORCA_ROOT_PATH" status --porcelain --untracked-files=no)" ]; then
+      git -C "$ORCA_ROOT_PATH" merge -q --ff-only '@{upstream}' || true
+    fi
+setupAgentStartupPolicy: start-immediately
