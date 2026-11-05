@@ -1,6 +1,7 @@
 """Exercise the reusable workflow's release gates and promotion program offline."""
 
 import base64
+from datetime import datetime
 import io
 import json
 import os
@@ -161,8 +162,23 @@ class BuildTests(unittest.TestCase):
                 self.build(root)
             self.assertFalse((root / "build-args").exists())
 
+    def test_release_metadata_matches_labels(self):
+        for tag, version in (("v1.2.3", "1.2.3"), ("sha-" + "b" * 40, "dev")):
+            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "Dockerfile").write_text("FROM scratch\n")
+                self.build(root, tag=tag)
+                arguments = (root / "build-args").read_text().splitlines()
+                self.assertIn("GIT_COMMIT=" + "b" * 40, arguments)
+                self.assertIn("VCS_REF=" + "b" * 40, arguments)
+                self.assertIn("VERSION=" + version, arguments)
+                self.assertIn("org.opencontainers.image.version=" + tag, arguments)
+                build_time = next(arg.removeprefix("BUILD_TIME=") for arg in arguments if arg.startswith("BUILD_TIME="))
+                self.assertEqual(datetime.strptime(build_time, "%Y-%m-%dT%H:%M:%SZ").isoformat() + "Z", build_time)
+                self.assertIn("org.opencontainers.image.created=" + build_time, arguments)
+
     @staticmethod
-    def build(root):
+    def build(root, tag="sha-" + "b" * 40):
         docker = """
         docker() {
           if [ "$1 $2" = 'buildx build' ]; then
@@ -179,7 +195,7 @@ class BuildTests(unittest.TestCase):
             root,
             SOURCE_SHA="b" * 40,
             GITHUB_REPOSITORY="daybreaker-labs/explicavet-api",
-            TAG="sha-" + "b" * 40,
+            TAG=tag,
         )
 
 
@@ -231,7 +247,7 @@ class PublicationTests(unittest.TestCase):
 
 
 class PromotionTests(unittest.TestCase):
-    def promote(self, missing_pin=False):
+    def promote(self, missing_pin=False, migration_job="true", invalid_file="migrate-job.yaml", duplicate_pin=False):
         calls = []
 
         def request(request, timeout):
@@ -242,8 +258,11 @@ class PromotionTests(unittest.TestCase):
                 result = {"object": {"sha": "base"}}
             elif path.startswith("contents/"):
                 content = "          image: fra.ocir.io/frsgxpf5mpny/explicavet-api@sha256:" + "a" * 64
-                if missing_pin and "migrate-job.yaml" in path:
-                    content = "unrelated: value"
+                if invalid_file in path:
+                    if missing_pin:
+                        content = "unrelated: value"
+                    elif duplicate_pin:
+                        content += "\n" + content
                 result = {"content": base64.b64encode(content.encode()).decode()}
             elif path == "git/commits/base":
                 result = {"tree": {"sha": "old-tree"}}
@@ -264,6 +283,7 @@ class PromotionTests(unittest.TestCase):
                     "DIGEST": "sha256:" + "b" * 64,
                     "TAG": "v1.2.3",
                     "SOURCE_SHA": "c" * 40,
+                    "MIGRATION_JOB": migration_job,
                     "GH_TOKEN": "fixture",
                     "GITHUB_RUN_ID": "123",
                     "GITHUB_RUN_ATTEMPT": "1",
@@ -272,7 +292,7 @@ class PromotionTests(unittest.TestCase):
             ),
             patch("urllib.request.urlopen", side_effect=request),
         ):
-            if missing_pin:
+            if missing_pin or duplicate_pin:
                 with self.assertRaises(AssertionError):
                     exec(compile(source, str(WORKFLOW), "exec"), {})  # noqa: S102 - execute the reviewed workflow program under a fake API
             else:
@@ -288,8 +308,27 @@ class PromotionTests(unittest.TestCase):
         self.assertTrue(calls["pulls"]["draft"])
         self.assertFalse(any("merge" in path for path in calls))
 
-    def test_missing_pin_stops_before_any_write(self):
-        self.assertTrue(all(body is None for _, body in self.promote(missing_pin=True)))
+    def test_single_pin_never_reads_migrate_job_and_pr_stays_draft(self):
+        calls = dict(self.promote(migration_job="false"))
+        self.assertFalse(any("migrate-job.yaml" in path for path in calls))
+        blobs = calls["git/trees"]["tree"]
+        self.assertEqual(len(blobs), 1)
+        self.assertEqual(blobs[0]["path"], "components/explicavet-api/base/deployment.yaml")
+        self.assertIn("@sha256:" + "b" * 64, blobs[0]["content"])
+        self.assertEqual(calls["git/commits"]["parents"], ["base"])
+        self.assertTrue(calls["pulls"]["draft"])
+
+    def test_invalid_selected_pin_stops_before_any_write(self):
+        for migration_job, filename in (("true", "migrate-job.yaml"), ("true", "deployment.yaml"), ("false", "deployment.yaml")):
+            for invalid in ("missing_pin", "duplicate_pin"):
+                with self.subTest(migration_job=migration_job, filename=filename, invalid=invalid):
+                    calls = self.promote(migration_job=migration_job, invalid_file=filename, **{invalid: True})
+                    self.assertTrue(all(body is None for _, body in calls))
+
+    def test_migration_job_input_defaults_to_true_and_reaches_promotion(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn("      migration-job:\n        description: Also promote the migrate-job.yaml image pin\n        type: boolean\n        default: true", workflow)
+        self.assertIn("MIGRATION_JOB: ${{ inputs.migration-job }}", workflow)
 
 
 if __name__ == "__main__":

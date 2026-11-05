@@ -17,6 +17,10 @@ on:
         description: Open a draft GitOps digest PR for a stable release
         type: boolean
         default: false
+      migration-job:
+        description: Also promote the migrate-job.yaml image pin
+        type: boolean
+        default: true
     secrets:
       OCIR_AUTH_TOKEN:
         required: false
@@ -114,7 +118,13 @@ jobs:
               if len(parts) >= 4 and parts[-2].upper() == 'AS':
                   stages.add(parts[-1])
           PY
-          build_args=(--build-arg "VCS_REF=$SOURCE_SHA")
+          version=dev
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="${TAG#v}"
+          fi
+          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          build_args=(--build-arg "VCS_REF=$SOURCE_SHA" --build-arg "GIT_COMMIT=$SOURCE_SHA"
+                      --build-arg "VERSION=$version" --build-arg "BUILD_TIME=$build_time")
           if [ -f go.mod ]; then
             go_version=$(awk '$1 == "go" {print $2; exit}' go.mod)
             [[ "$go_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -124,7 +134,7 @@ jobs:
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
             --label "org.opencontainers.image.version=$TAG" \
-            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.created=$build_time" \
             -t product:qualification .
           test "$(docker image inspect product:qualification --format '{{.Architecture}}')" = arm64
           user=$(docker image inspect product:qualification --format '{{.Config.User}}')
@@ -247,6 +257,7 @@ jobs:
           permission-pull-requests: write
       - name: Open a draft GitOps digest change
         env:
+          MIGRATION_JOB: ${{ inputs.migration-job }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DIGEST: ${{ needs.publish.outputs.digest }}
           SOURCE_SHA: ${{ needs.build.outputs.sha }}
@@ -272,7 +283,10 @@ jobs:
 
           base = api('git/ref/heads/main')['object']['sha']
           tree = []
-          for filename in ('deployment.yaml', 'migrate-job.yaml'):
+          filenames = ['deployment.yaml']
+          if os.environ['MIGRATION_JOB'] == 'true':
+              filenames.append('migrate-job.yaml')
+          for filename in filenames:
               path = f'components/{name}/base/{filename}'
               original = api(f'contents/{path}?ref={base}')
               content = base64.b64decode(original['content']).decode()
@@ -289,7 +303,7 @@ jobs:
           api('git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit})
           pr = api('pulls', {'title': f'chore({name}): promote {os.environ["TAG"]}',
               'head': branch, 'base': 'main', 'draft': True,
-              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.\n\nReview migrations and runtime readiness before merging. Roll back both image pins to their previous digest; schema rollback requires a separate review.'})
+              'body': f'Pin {image}@{digest} from source {os.environ["SOURCE_SHA"]}.\n\nReview migrations and runtime readiness before merging. Roll back the promoted image pins to their previous digest; schema rollback requires a separate review.'})
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write(pr['html_url'] + '\n')
           PY

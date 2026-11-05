@@ -16,7 +16,9 @@ introduces the first caller, `explicavet-api`.
   must run as non-root. The workflow adds source, revision, version and creation
   time OCI labels and checks the native architecture.
   Go callers derive the exact `GO_VERSION` build argument from `go.mod`;
-  all callers receive the source commit as `VCS_REF`.
+  all callers receive the source commit as `VCS_REF` and `GIT_COMMIT`,
+  `VERSION` (`X.Y.Z` for stable `vX.Y.Z` tags, otherwise `dev`), and
+  `BUILD_TIME` (UTC RFC 3339, shared with the creation label).
 - `publish: true` accepts a `vX.Y.Z` push, or a manual dispatch on `main` or
   `develop`. Stable releases must already belong to fetched `origin/main`.
   Branch dispatches publish `sha-<full commit>` for qualification.
@@ -28,9 +30,13 @@ introduces the first caller, `explicavet-api`.
   Promotion also needs explicit `DEPLOY_APP_ID` and `DEPLOY_APP_PRIVATE_KEY`
   secrets for a GitHub App installed on `daybreaker-gitops` with Contents write
   and Pull requests write. No `secrets: inherit`.
-- The promotion contract is exactly one image pin in each of
-  `components/<image-name>/base/deployment.yaml` and `migrate-job.yaml`.
-  Promotion changes both pins in one Git commit and leaves the PR in draft.
+- The promotion contract requires exactly one image pin in
+  `components/<image-name>/base/deployment.yaml`. The boolean input
+  `migration-job` defaults to `true` and also requires exactly one pin in
+  `components/<image-name>/base/migrate-job.yaml`. Set `migration-job: false`
+  for products that migrate at startup; promotion then reads and changes only
+  the deployment pin. All selected pins change in one Git commit and the PR
+  stays in draft. Missing or duplicate selected pins stop promotion before writes.
 
 The build job runs caller code. The publication job never checks out or runs
 that code: it restores an archive under a run-attempt-specific cache key,
@@ -62,6 +68,14 @@ jobs:
 
 For publishing, pass `OCIR_AUTH_TOKEN` explicitly from the caller. Promotion also needs the two deploy-App secrets above. Never store caller credentials in this repository. `workflow_call` executes in the caller context; the caller owns runner variables, secrets and cache access. This repository's own checks use GitHub-hosted runners.
 
+## Versioning
+
+Consumers pin full commit SHAs with a matching version comment. Release compatible
+new inputs as a minor `vX.Y.Z` tag and compatible fixes as a patch tag, after the
+PR is reviewed, merged and its required checks pass. Create the tag at the merge
+commit; never move an existing tag. Existing SHA pins keep their behavior until
+their callers explicitly update them.
+
 ## Checks
 
 Run `python3 -m unittest discover -s scripts/tests`, `actionlint` and `zizmor --persona=regular .`. The required organization scanner also runs online on pull requests. Offline local checks can use `zizmor --offline --persona=regular .`.
@@ -70,4 +84,4 @@ Renovate's central runner discovers this repository from its root config. Mainta
 
 ## Rollback
 
-A caller can restore its previous reviewed workflow SHA through a pull request. Close an unmerged promotion PR to cancel deployment; after deployment, revert both GitOps image pins to the last verified digest after checking schema compatibility. Preserve database storage, backups and published tags. Credential custody and workload rollout remain in their owning private repositories.
+A caller can restore its previous reviewed workflow SHA through a pull request. Close an unmerged promotion PR to cancel deployment; after deployment, revert the promoted GitOps image pins to the last verified digest after checking schema compatibility. Preserve database storage, backups and published tags. Credential custody and workload rollout remain in their owning private repositories.
