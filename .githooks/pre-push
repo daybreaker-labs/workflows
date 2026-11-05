@@ -1,4 +1,8 @@
 #!/bin/sh
 # Runs the local gate before every push. Enable once per clone:
 #   git config core.hooksPath .githooks
+# Git exports GIT_DIR and related variables to hooks. Clear them, so tests that
+# create their own repositories cannot write to this one.
+# shellcheck disable=SC2046 # one variable name per word
+unset $(git rev-parse --local-env-vars)
 exec scripts/check
