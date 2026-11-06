@@ -5,6 +5,8 @@ name: testbox
 # job checks out the caller, runs the caller-owned setup script, and keeps the
 # VM open for `blacksmith testbox run`. An empty testbox_id runs validation
 # mode: begin-testbox and run-testbox skip the session and only setup runs.
+# The Blacksmith CLI refuses to warm up a caller file without a Testbox step
+# of its own; the README's caller recipe adds a marker job that never runs.
 
 on:
   workflow_call:

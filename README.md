@@ -104,6 +104,88 @@ jobs:
 
 For publishing, pass `OCIR_AUTH_TOKEN` explicitly from the caller. Promotion also needs the two deploy-App secrets above. Never store caller credentials in this repository. `workflow_call` executes in the caller context; the caller owns runner variables, secrets and cache access. This repository's own checks use GitHub-hosted runners.
 
+## Testbox
+
+`.github/workflows/testbox.yml` is the shared frame for a
+[Blacksmith Testbox](https://docs.blacksmith.sh/blacksmith-testbox/overview):
+`begin-testbox`, then `useblacksmith/checkout` without persisted credentials,
+then the caller's setup script, then the SSH environment export and its check,
+and finally `run-testbox`, which runs even after a failed setup so the session
+reports the failure. It reads no secrets and asks only for `contents: read`.
+[FOUND-334](https://linear.app/daybreaker-labs/issue/FOUND-334) introduces it.
+
+| Input | Meaning |
+| --- | --- |
+| `testbox_id` | The caller's `workflow_dispatch` input. Empty runs validation mode: setup runs, no session starts. |
+| `runs-on` | A Blacksmith label, normally a routing variable with a literal fallback. Testbox works only on Blacksmith. |
+| `timeout-minutes` | Absolute job limit, idle time included. Default 15. |
+| `setup` | Repository-relative script, run with `bash` from the checkout root. |
+
+SSH commands inherit neither `GITHUB_PATH` nor the workflow environment, so
+the workflow exports them. After setup, `~/.testbox-env` holds the final
+`PATH`, `RUNNER_TEMP`, `GITHUB_WORKSPACE` and every variable the setup wrote
+to `GITHUB_ENV`. A line at the top of `~/.bashrc` loads it, before the
+interactive-shell guard, because bash reads `~/.bashrc` for commands run by
+sshd. The next step checks this in an emulated SSH shell and fails the job if
+the values differ. Variables the script only `export`s don't persist. Setup
+can't run other actions, so it installs its tools itself. Testbox values are
+readable on the VM and in `~/.testbox-env`: use disposable test fixtures only,
+never secrets.
+
+### Add Testbox to a repository
+
+1. Write `.github/testbox/setup.sh`. Install tools under `$RUNNER_TEMP`, then
+   append their directories to `$GITHUB_PATH` and write each variable the
+   tests need to `$GITHUB_ENV`.
+2. Add a caller, for example `.github/workflows/testbox.yml`:
+
+   ```yaml
+   name: Blacksmith Testbox
+   on:
+     workflow_dispatch:
+       inputs:
+         testbox_id:
+           type: string
+           description: Testbox session ID
+           required: true
+
+   permissions:
+     contents: read
+
+   jobs:
+     testbox:
+       uses: daybreaker-labs/workflows/.github/workflows/testbox.yml@<full-commit-SHA> # vX.Y.Z
+       with:
+         testbox_id: ${{ inputs.testbox_id }}
+         runs-on: ${{ vars.CI_RUNNER || 'blacksmith-2vcpu-ubuntu-2404-arm' }}
+         setup: .github/testbox/setup.sh
+     # The Blacksmith CLI (0.5.3) warms up only a workflow whose own file has a
+     # Testbox step. This job satisfies that check and never runs.
+     testbox-cli-marker:
+       if: false
+       runs-on: ubuntu-24.04
+       steps:
+         - uses: useblacksmith/run-testbox@9b976c32aa3bcbffb348889673585a5deee1b2f3 # v2
+   ```
+
+3. Merge the caller to the default branch. GitHub returns 404 when you
+   dispatch a workflow file it has not registered yet. Afterwards, any branch
+   that contains the file can be warmed up.
+4. Run a session from the repository root. Don't pass `--job`: the CLI checks
+   that job's own steps and rejects the reusable-workflow job.
+
+   ```sh
+   blacksmith testbox warmup testbox.yml --idle-timeout 1
+   blacksmith testbox run --id <ID> '<test command>'
+   blacksmith testbox stop --id <ID>
+   blacksmith testbox list
+   ```
+
+   `list` and `status` show the marker job's name; the session itself runs in
+   the `testbox / Testbox` job. Stop the box after the last command. Stopping
+   cancels the Actions job, so a canceled conclusion is expected. The exit code
+   of `run` is the test result.
+
 ## Versioning
 
 Consumers pin full commit SHAs with a matching version comment. Release compatible
@@ -114,7 +196,7 @@ their callers explicitly update them.
 
 ## Checks
 
-Run `python3 -m unittest discover -s scripts/tests`, `actionlint` and `zizmor --persona=regular .`. The required organization scanner also runs online on pull requests. Offline local checks can use `zizmor --offline --persona=regular .`.
+Run `python3 -m unittest discover -s scripts/tests`, `actionlint` and `zizmor --persona=regular .`. The required organization scanner also runs online on pull requests. Offline local checks can use `zizmor --offline --persona=regular .`. `scripts/check` runs all three. The `testbox` job in `checks.yml` calls the Testbox workflow in validation mode on a GitHub-hosted runner with `scripts/tests/fixtures/testbox-setup.sh`.
 
 Renovate's central runner discovers this repository from its root config. Maintainers review dependency changes.
 
