@@ -66,10 +66,12 @@ jobs:
       archive_sha256: ${{ steps.archive.outputs.sha256 }}
       image_id: ${{ steps.archive.outputs.image_id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: useblacksmith/checkout@2b9fe87d796feea153b455ec2f3125b471a7b0e7 # v1.8.2
         with:
           fetch-depth: 0
           persist-credentials: false
+          # Caller Docker builds can read Git metadata inside the container.
+          dissociate: true
       - name: Validate source and release ancestry
         id: source
         env:

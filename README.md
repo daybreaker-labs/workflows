@@ -102,7 +102,7 @@ jobs:
       promote: false
 ```
 
-For publishing, pass `OCIR_AUTH_TOKEN` explicitly from the caller. Promotion also needs the two deploy-App secrets above. Never store caller credentials in this repository. `workflow_call` executes in the caller context; the caller owns runner variables, secrets and cache access. This repository's own checks use GitHub-hosted runners.
+For publishing, pass `OCIR_AUTH_TOKEN` explicitly from the caller. Promotion also needs the two deploy-App secrets above. Never store caller credentials in this repository. `workflow_call` executes in the caller context; the caller owns runner variables, secrets and cache access. This repository's own checks use `CI_RUNNER`, with `ubuntu-24.04-arm` as the GitHub-hosted fallback.
 
 ## Testbox
 
@@ -198,7 +198,7 @@ their callers explicitly update them.
 
 ## Checks
 
-Run `python3 -m unittest discover -s scripts/tests`, `actionlint` and `zizmor --persona=regular .`. The required organization scanner also runs online on pull requests. Offline local checks can use `zizmor --offline --persona=regular .`. `scripts/check` runs all three. The `testbox` job in `checks.yml` calls the Testbox workflow in validation mode on a GitHub-hosted runner with `scripts/tests/fixtures/testbox-setup.sh`.
+Run `python3 -m unittest discover -s scripts/tests`, `actionlint` and `zizmor --persona=regular .`. The required organization scanner also runs online on pull requests. Offline local checks can use `zizmor --offline --persona=regular .`. `scripts/check` runs all three. The `testbox` job in `checks.yml` calls the Testbox workflow in validation mode through `CI_RUNNER`, with `ubuntu-24.04-arm` as the GitHub-hosted fallback, using `scripts/tests/fixtures/testbox-setup.sh`.
 
 Renovate's central runner discovers this repository from its root config. Maintainers review dependency changes.
 
