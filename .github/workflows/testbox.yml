@@ -1,0 +1,126 @@
+name: testbox
+
+# Shared Blacksmith Testbox frame. A caller repository dispatches a short
+# workflow_dispatch caller of this file with `blacksmith testbox warmup`; the
+# job checks out the caller, runs the caller-owned setup script, and keeps the
+# VM open for `blacksmith testbox run`. An empty testbox_id runs validation
+# mode: begin-testbox and run-testbox skip the session and only setup runs.
+# The Blacksmith CLI refuses to warm up a caller file without a Testbox step
+# of its own; the README's caller recipe adds a marker job that never runs.
+
+on:
+  workflow_call:
+    inputs:
+      testbox_id:
+        description: Testbox session ID from the caller's workflow_dispatch input; empty runs validation mode
+        type: string
+        default: ''
+      runs-on:
+        description: Ubuntu Blacksmith runner label, normally a routing variable with a literal fallback
+        type: string
+        required: true
+      timeout-minutes:
+        description: Absolute job limit in minutes, including idle time
+        type: number
+        default: 15
+      setup:
+        description: Repository-relative path of the caller's setup script, run with bash -eo pipefail from the checkout root
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  testbox:
+    name: Testbox
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Begin Testbox
+        uses: useblacksmith/begin-testbox@22ff2ea5697369864347140857d218e42815b33c # v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+      - uses: useblacksmith/checkout@2b9fe87d796feea153b455ec2f3125b471a7b0e7 # v1.8.2
+        with:
+          persist-credentials: false
+      - name: Run setup
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: |
+          case "$SETUP" in
+            '' | /* | ../* | */../* | *'/..') echo "::error::setup must be a repository-relative path" >&2; exit 1 ;;
+          esac
+          if [ ! -f "$SETUP" ]; then
+            echo "::error::setup script $SETUP does not exist in the checkout" >&2
+            exit 1
+          fi
+          # Fail on the first failing command, as a run step would.
+          bash -eo pipefail "$SETUP"
+          # The names the setup wrote to this step's GITHUB_ENV file are the
+          # variables exported to SSH commands; their values reach the next step.
+          names="$RUNNER_TEMP/testbox-ssh-env-names"
+          heredoc='^([A-Za-z_][A-Za-z0-9_]*)<<(.+)$'
+          assignment='^([A-Za-z_][A-Za-z0-9_]*)='
+          delimiter=''
+          while IFS= read -r line || [ -n "$line" ]; do
+            if [ -n "$delimiter" ]; then
+              [ "$line" = "$delimiter" ] && delimiter=''
+              continue
+            fi
+            if [[ $line =~ $heredoc ]]; then
+              printf '%s\n' "${BASH_REMATCH[1]}"
+              delimiter=${BASH_REMATCH[2]}
+            elif [[ $line =~ $assignment ]]; then
+              printf '%s\n' "${BASH_REMATCH[1]}"
+            fi
+          done < "$GITHUB_ENV" | sort -u > "$names"
+      - name: Expose the environment to SSH commands
+        run: |
+          # SSH commands inherit neither GITHUB_PATH nor the workflow
+          # environment. Write the setup's PATH and variables to a file, and
+          # load it from the top of ~/.bashrc, which bash reads for commands
+          # run by sshd before the interactive-shell guard returns.
+          # Every SSH command, rsync included, loads the file: it must never
+          # write to stdout.
+          env_file="$HOME/.testbox-env"
+          {
+            echo '# Written by the shared Testbox workflow for SSH commands.'
+            for name in PATH RUNNER_TEMP GITHUB_WORKSPACE; do
+              printf 'export %s=%q\n' "$name" "${!name}"
+            done
+            while IFS= read -r name; do
+              case "$name" in PATH | RUNNER_TEMP | GITHUB_WORKSPACE) continue ;; esac
+              printf 'export %s=%q\n' "$name" "${!name-}"
+            done < "$RUNNER_TEMP/testbox-ssh-env-names"
+          } > "$env_file"
+          marker='# testbox-ssh-env'
+          if ! grep -qF "$marker" "$HOME/.bashrc" 2>/dev/null; then
+            {
+              # ~/.bashrc expands $HOME when it runs.
+              # shellcheck disable=SC2016
+              printf 'if [ -r "$HOME/.testbox-env" ]; then . "$HOME/.testbox-env"; fi %s\n' "$marker"
+              cat "$HOME/.bashrc" 2>/dev/null || true
+            } > "$RUNNER_TEMP/testbox-bashrc"
+            mv "$RUNNER_TEMP/testbox-bashrc" "$HOME/.bashrc"
+          fi
+          sed 's/=.*//' "$env_file"
+      - name: Check SSH commands see the environment
+        run: |
+          # Emulate sshd's non-interactive command shell: an empty environment
+          # with SSH_CLIENT set makes bash read ~/.bashrc.
+          mapfile -t names < <(printf '%s\n' PATH RUNNER_TEMP GITHUB_WORKSPACE; cat "$RUNNER_TEMP/testbox-ssh-env-names")
+          # The single-quoted program runs in the emulated SSH shell.
+          # shellcheck disable=SC2016
+          show='for name do printf "%s=%s\0" "$name" "${!name-}"; done'
+          expected=$(bash -c "$show" _ "${names[@]}" | sha256sum)
+          actual=$(env -i HOME="$HOME" USER="$USER" SSH_CLIENT='127.0.0.1 22 22' PATH=/usr/bin:/bin \
+            bash -c "$show" _ "${names[@]}" | sha256sum)
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::An SSH command would not see the setup's PATH and variables" >&2
+            exit 1
+          fi
+          echo "SSH commands see PATH and ${#names[@]} variables"
+      - name: Run Testbox
+        uses: useblacksmith/run-testbox@9b976c32aa3bcbffb348889673585a5deee1b2f3 # v2
+        if: always()
