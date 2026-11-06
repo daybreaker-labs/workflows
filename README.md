@@ -117,9 +117,9 @@ reports the failure. It reads no secrets and asks only for `contents: read`.
 | Input | Meaning |
 | --- | --- |
 | `testbox_id` | The caller's `workflow_dispatch` input. Empty runs validation mode: setup runs, no session starts. |
-| `runs-on` | A Blacksmith label, normally a routing variable with a literal fallback. Testbox works only on Blacksmith. |
+| `runs-on` | An Ubuntu Blacksmith label, normally a routing variable with a literal fallback. Testbox works only on Blacksmith, and the SSH export relies on Ubuntu's bash and a bash login shell. |
 | `timeout-minutes` | Absolute job limit, idle time included. Default 15. |
-| `setup` | Repository-relative script, run with `bash` from the checkout root. |
+| `setup` | Repository-relative script, run with `bash -eo pipefail` from the checkout root. |
 
 SSH commands inherit neither `GITHUB_PATH` nor the workflow environment, so
 the workflow exports them. After setup, `~/.testbox-env` holds the final
@@ -181,7 +181,9 @@ never secrets.
    blacksmith testbox list
    ```
 
-   `list` and `status` show the marker job's name; the session itself runs in
+   The one-minute idle timeout limits unattended compute: a pause of more
+   than about a minute between `run` commands ends the box, so raise it for
+   interactive work. `list` and `status` show the marker job's name; the session itself runs in
    the `testbox / Testbox` job. Stop the box after the last command. Stopping
    cancels the Actions job, so a canceled conclusion is expected. The exit code
    of `run` is the test result.

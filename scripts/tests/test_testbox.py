@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import subprocess
 import tempfile
 import textwrap
@@ -114,6 +115,32 @@ class TestboxWorkflowTests(unittest.TestCase):
         tool = self.ssh_shell("testbox-fixture-tool; echo ${AFTER_GUARD:-guarded}")
         self.assertEqual(tool.stdout.split(), ["testbox-fixture-tool", "guarded"])
         self.assertNotIn("postgres://", stdout, "the log lists names, never values")
+
+    def check_step(self, env):
+        return step_shell("Check SSH commands see the environment", ROOT, env)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the check step targets Ubuntu runners")
+    def test_check_step_passes_with_the_hook_and_fails_without_it(self):
+        probe = subprocess.run(["env", "-i", f"HOME={self.home}", "SSH_CLIENT=127.0.0.1 22 22", "PATH=/usr/bin:/bin",
+                                "bash", "-c", "echo ${AFTER_GUARD:-read}"], text=True, capture_output=True)
+        if probe.stdout.strip() != "read":
+            self.skipTest("this bash does not read ~/.bashrc for SSH commands")
+        env, _ = self.export()
+        result = self.check_step(env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bashrc = self.home / ".bashrc"
+        bashrc.write_text(bashrc.read_text().split("\n", 1)[1])
+        result = self.check_step(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::An SSH command would not see", result.stderr)
+
+    def test_failing_setup_command_fails_the_step(self):
+        script = self.root / "repo" / "setup.sh"
+        script.parent.mkdir()
+        script.write_text("false\necho reached >> \"$GITHUB_ENV\"\n")
+        result = step_shell("Run setup", script.parent, {**self.base, "SETUP": "setup.sh"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.github_env.read_text(), "")
 
     def test_bashrc_hook_is_prepended_once(self):
         self.export()

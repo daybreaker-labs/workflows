@@ -16,7 +16,7 @@ on:
         type: string
         default: ''
       runs-on:
-        description: Runner label, normally a Blacksmith routing variable with a literal fallback
+        description: Ubuntu Blacksmith runner label, normally a routing variable with a literal fallback
         type: string
         required: true
       timeout-minutes:
@@ -24,7 +24,7 @@ on:
         type: number
         default: 15
       setup:
-        description: Repository-relative path of the caller's setup script, run with bash from the checkout root
+        description: Repository-relative path of the caller's setup script, run with bash -eo pipefail from the checkout root
         type: string
         required: true
 
@@ -55,7 +55,8 @@ jobs:
             echo "::error::setup script $SETUP does not exist in the checkout" >&2
             exit 1
           fi
-          bash "$SETUP"
+          # Fail on the first failing command, as a run step would.
+          bash -eo pipefail "$SETUP"
           # The names the setup wrote to this step's GITHUB_ENV file are the
           # variables exported to SSH commands; their values reach the next step.
           names="$RUNNER_TEMP/testbox-ssh-env-names"
@@ -80,6 +81,8 @@ jobs:
           # environment. Write the setup's PATH and variables to a file, and
           # load it from the top of ~/.bashrc, which bash reads for commands
           # run by sshd before the interactive-shell guard returns.
+          # Every SSH command, rsync included, loads the file: it must never
+          # write to stdout.
           env_file="$HOME/.testbox-env"
           {
             echo '# Written by the shared Testbox workflow for SSH commands.'
