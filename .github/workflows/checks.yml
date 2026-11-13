@@ -35,11 +35,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona=regular --format=github .
-  # Validation mode of the shared Testbox workflow: no session starts, and the
-  # fixture setup must reach the emulated SSH shell.
   testbox:
-    # actionlint v1.7.12 rejects the `$/` self-repository form; `./` keeps its
-    # input checks against testbox.yml.
+    # actionlint v1.7.12 rejects the `$/` self-repository form.
     uses: ./.github/workflows/testbox.yml # zizmor: ignore[self-repository]
     with:
       runs-on: ubuntu-24.04

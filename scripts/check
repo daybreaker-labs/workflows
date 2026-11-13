@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
-# Local gate: the `check` job of checks.yml, run before a push instead of in a
-# CI round. The job takes seconds, so every push runs all of it.
-#
-# .githooks/pre-push runs it once `git config core.hooksPath .githooks` is set.
-# The zizmor version is read from checks.yml; the local scan runs offline.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 failed=()
-# Each step is also a span when daybreaker-otel is installed and enabled (Orca
-# sessions on an opted-in machine); without it the step only runs.
 step() {
   local name=$1 code=0 start=''; shift
   echo "== $name"

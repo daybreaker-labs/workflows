@@ -1,7 +1,7 @@
 name: Product image
 
-# The build executes caller code without registry/App credentials. Publish
-# verifies its opaque archive before login; promotion never executes caller code.
+# Caller code must run without registry/App credentials.
+# Archives must be verified before login; promotion must never execute caller code.
 on:
   workflow_call:
     inputs:
@@ -125,7 +125,6 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           TAG: ${{ steps.source.outputs.tag }}
         run: |
-          # Reject moving external bases; named stages and scratch are allowed.
           python3 - <<'PY'
           import re
           from pathlib import Path

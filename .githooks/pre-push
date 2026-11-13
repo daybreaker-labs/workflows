@@ -1,12 +1,7 @@
 #!/bin/sh
-# Runs the local gate before every push. Enable once per clone:
-#   git config core.hooksPath .githooks
-# Git exports GIT_DIR and related variables to hooks. Clear them, so tests that
-# create their own repositories cannot write to this one.
+# Git exports repository variables to hooks; tests create their own repositories.
 # shellcheck disable=SC2046 # one variable name per word
 unset $(git rev-parse --local-env-vars)
-# With daybreaker-otel installed the run becomes the root span of its steps;
-# without it, or outside an opted-in Orca session, it only runs the gate.
 if command -v daybreaker-otel >/dev/null 2>&1; then
   exec daybreaker-otel run --service local-gate --name pre-push -- scripts/check
 fi
