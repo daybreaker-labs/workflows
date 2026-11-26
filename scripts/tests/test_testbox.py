@@ -158,11 +158,12 @@ class TestboxWorkflowTests(unittest.TestCase):
             ["Begin Testbox", "useblacksmith/checkout", "Run setup", "Expose the environment to SSH commands",
              "Check SSH commands see the environment", "Run Testbox"],
         )
-        self.assertIn("uses: useblacksmith/begin-testbox@22ff2ea5697369864347140857d218e42815b33c # v2", workflow)
-        self.assertIn("uses: useblacksmith/checkout@2b9fe87d796feea153b455ec2f3125b471a7b0e7 # v1.8.2\n"
-                      "        with:\n          persist-credentials: false", workflow)
-        self.assertIn("uses: useblacksmith/run-testbox@9b976c32aa3bcbffb348889673585a5deee1b2f3 # v2\n"
-                      "        if: always()", workflow)
+        # Renovate moves the SHAs; zizmor checks each SHA against its version comment.
+        pin = r"@[0-9a-f]{40} # v[0-9]+(?:\.[0-9]+)*\n"
+        self.assertRegex(workflow, r"uses: useblacksmith/begin-testbox" + pin)
+        self.assertRegex(workflow, r"uses: useblacksmith/checkout" + pin + r"        with:\n          persist-credentials: false\n")
+        self.assertRegex(workflow, r"uses: useblacksmith/run-testbox" + pin + r"        if: always\(\)\n")
+        self.assertEqual(len(re.findall(r"uses: ", workflow)), 3)
         self.assertIn("\npermissions:\n  contents: read\n", workflow)
         self.assertNotIn("secrets", workflow)
         for step in ("Run setup", "Expose the environment to SSH commands", "Check SSH commands see the environment"):
